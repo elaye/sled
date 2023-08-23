@@ -1,12 +1,11 @@
 #[cfg(feature = "zstd")]
-use zstd::block::{compress, decompress};
+use zstd::bulk::{compress, decompress};
 
 use crate::*;
 
 use super::{
-    arr_to_u32, gc_blobs, pwrite_all, raw_segment_iter_from, u32_to_arr,
-    u64_to_arr, BasedBuf, DiskPtr, LogIter, LogKind, LogOffset, Lsn,
-    MessageKind,
+    arr_to_u32, gc_blobs, pwrite_all, raw_segment_iter_from, u32_to_arr, u64_to_arr, BasedBuf,
+    DiskPtr, LogIter, LogKind, LogOffset, Lsn, MessageKind,
 };
 
 /// A snapshot of the state required to quickly restart
@@ -53,7 +52,10 @@ pub enum PageState {
 impl PageState {
     fn push(&mut self, item: (Lsn, DiskPtr, u64)) {
         match *self {
-            PageState::Present { base, ref mut frags } => {
+            PageState::Present {
+                base,
+                ref mut frags,
+            } => {
                 if frags.last().map_or(base.0, |f| f.0) < item.0 {
                     frags.push(item)
                 } else {
@@ -94,10 +96,7 @@ impl PageState {
 }
 
 impl Snapshot {
-    pub fn recovered_coords(
-        &self,
-        segment_size: usize,
-    ) -> (Option<LogOffset>, Option<Lsn>) {
+    pub fn recovered_coords(&self, segment_size: usize) -> (Option<LogOffset>, Option<Lsn>) {
         if self.stable_lsn.is_none() {
             return (None, None);
         }
@@ -111,7 +110,11 @@ impl Snapshot {
             (Some(offset), Some(stable_lsn))
         } else {
             let lsn_idx = stable_lsn / segment_size as Lsn
-                + if stable_lsn % segment_size as Lsn == 0 { 0 } else { 1 };
+                + if stable_lsn % segment_size as Lsn == 0 {
+                    0
+                } else {
+                    1
+                };
             let next_lsn = lsn_idx * segment_size as Lsn;
             (None, Some(next_lsn))
         }
@@ -134,10 +137,8 @@ impl Snapshot {
         let _measure = Measure::new(&M.snapshot_apply);
 
         let pushed = if self.pt.len() <= usize::try_from(pid).unwrap() {
-            self.pt.resize(
-                usize::try_from(pid + 1).unwrap(),
-                PageState::Uninitialized,
-            );
+            self.pt
+                .resize(usize::try_from(pid + 1).unwrap(), PageState::Uninitialized);
             true
         } else {
             false
@@ -145,12 +146,7 @@ impl Snapshot {
 
         match log_kind {
             LogKind::Replace => {
-                trace!(
-                    "compact of pid {} at ptr {} lsn {}",
-                    pid,
-                    disk_ptr,
-                    lsn,
-                );
+                trace!("compact of pid {} at ptr {} lsn {}", pid, disk_ptr, lsn,);
 
                 let pid_usize = usize::try_from(pid).unwrap();
 
@@ -166,12 +162,7 @@ impl Snapshot {
                 if let Some(lids @ PageState::Present { .. }) =
                     self.pt.get_mut(usize::try_from(pid).unwrap())
                 {
-                    trace!(
-                        "append of pid {} at lid {} lsn {}",
-                        pid,
-                        disk_ptr,
-                        lsn,
-                    );
+                    trace!("append of pid {} at lid {} lsn {}", pid, disk_ptr, lsn,);
 
                     lids.push((lsn, disk_ptr, sz));
                 } else {
@@ -192,8 +183,7 @@ impl Snapshot {
             }
             LogKind::Free => {
                 trace!("free of pid {} at ptr {} lsn {}", pid, disk_ptr, lsn);
-                self.pt[usize::try_from(pid).unwrap()] =
-                    PageState::Free(lsn, disk_ptr);
+                self.pt[usize::try_from(pid).unwrap()] = PageState::Free(lsn, disk_ptr);
             }
             LogKind::Corrupted | LogKind::Skip => {
                 error!(
@@ -263,8 +253,8 @@ fn advance_snapshot(
     //    in te SA initialization to properly initialize any segment tracking
     //    state despite not having any pages currently residing there.
 
-    let no_recovery_progress = iter.cur_lsn.is_none()
-        || iter.cur_lsn.unwrap() <= snapshot.stable_lsn.unwrap_or(0);
+    let no_recovery_progress =
+        iter.cur_lsn.is_none() || iter.cur_lsn.unwrap() <= snapshot.stable_lsn.unwrap_or(0);
     let db_is_empty = no_recovery_progress && snapshot.stable_lsn.is_none();
 
     #[cfg(feature = "testing")]
@@ -295,48 +285,43 @@ fn advance_snapshot(
         let monotonic = segment_progress >= SEG_HEADER_LEN as Lsn
             || (segment_progress == 0 && iter.segment_base.is_none());
         if !monotonic {
-            error!("expected segment progress {} to be above SEG_HEADER_LEN or == 0, cur_lsn: {}",
-                segment_progress,
-                iterated_lsn,
+            error!(
+                "expected segment progress {} to be above SEG_HEADER_LEN or == 0, cur_lsn: {}",
+                segment_progress, iterated_lsn,
             );
             return Err(Error::corruption(None));
         }
 
-        let (stable_lsn, active_segment) = if segment_progress
-            + MAX_MSG_HEADER_LEN as Lsn
-            >= config.segment_size as Lsn
-        {
-            let bumped =
-                config.normalize(iterated_lsn) + config.segment_size as Lsn;
-            trace!("bumping snapshot.stable_lsn to {}", bumped);
-            (bumped, None)
-        } else {
-            if let Some(BasedBuf { offset, .. }) = iter.segment_base {
-                // either situation 3 or situation 4. we need to zero the
-                // tail of the segment after the recovered tip
-                let shred_len = config.segment_size
-                    - usize::try_from(segment_progress).unwrap()
-                    - 1;
-                let shred_zone = vec![MessageKind::Corrupted.into(); shred_len];
-                let shred_base =
-                    offset + LogOffset::try_from(segment_progress).unwrap();
+        let (stable_lsn, active_segment) =
+            if segment_progress + MAX_MSG_HEADER_LEN as Lsn >= config.segment_size as Lsn {
+                let bumped = config.normalize(iterated_lsn) + config.segment_size as Lsn;
+                trace!("bumping snapshot.stable_lsn to {}", bumped);
+                (bumped, None)
+            } else {
+                if let Some(BasedBuf { offset, .. }) = iter.segment_base {
+                    // either situation 3 or situation 4. we need to zero the
+                    // tail of the segment after the recovered tip
+                    let shred_len =
+                        config.segment_size - usize::try_from(segment_progress).unwrap() - 1;
+                    let shred_zone = vec![MessageKind::Corrupted.into(); shred_len];
+                    let shred_base = offset + LogOffset::try_from(segment_progress).unwrap();
 
-                #[cfg(feature = "testing")]
-                {
-                    shred_point = Some(shred_base);
+                    #[cfg(feature = "testing")]
+                    {
+                        shred_point = Some(shred_base);
+                    }
+
+                    debug!(
+                        "zeroing the end of the recovered segment at lsn {} between lids {} and {}",
+                        config.normalize(iterated_lsn),
+                        shred_base,
+                        shred_base + shred_len as LogOffset
+                    );
+                    pwrite_all(&config.file, &shred_zone, shred_base)?;
+                    config.file.sync_all()?;
                 }
-
-                debug!(
-                    "zeroing the end of the recovered segment at lsn {} between lids {} and {}",
-                    config.normalize(iterated_lsn),
-                    shred_base,
-                    shred_base + shred_len as LogOffset
-                );
-                pwrite_all(&config.file, &shred_zone, shred_base)?;
-                config.file.sync_all()?;
-            }
-            (iterated_lsn, iter.segment_base.map(|bb| bb.offset))
-        };
+                (iterated_lsn, iter.segment_base.map(|bb| bb.offset))
+            };
 
         if stable_lsn < snapshot.stable_lsn.unwrap_or(0) {
             error!(
@@ -385,9 +370,7 @@ fn advance_snapshot(
                         shred_base
                     );
                 }
-                let entry = reverse_segments
-                    .entry(segment)
-                    .or_insert_with(HashSet::new);
+                let entry = reverse_segments.entry(segment).or_insert_with(HashSet::new);
                 entry.insert((pid, offset));
             }
         }
@@ -432,7 +415,9 @@ fn advance_snapshot(
     }
 
     #[cfg(feature = "event_log")]
-    config.event_log.recovered_lsn(snapshot.stable_lsn.unwrap_or(0));
+    config
+        .event_log
+        .recovered_lsn(snapshot.stable_lsn.unwrap_or(0));
 
     Ok(snapshot)
 }
@@ -444,8 +429,7 @@ pub fn read_snapshot_or_default(config: &RunningConfig) -> Result<Snapshot> {
     // We only use a default Snapshot when there is no snapshot found.
     let last_snap = read_snapshot(config)?.unwrap_or_else(Snapshot::default);
 
-    let log_iter =
-        raw_segment_iter_from(last_snap.stable_lsn.unwrap_or(0), config)?;
+    let log_iter = raw_segment_iter_from(last_snap.stable_lsn.unwrap_or(0), config)?;
 
     let res = advance_snapshot(log_iter, last_snap, config)?;
 
@@ -495,8 +479,7 @@ fn read_snapshot(config: &RunningConfig) -> Result<Option<Snapshot>> {
     let bytes = if config.use_compression {
         use std::convert::TryInto;
 
-        let len_expected: u64 =
-            u64::from_le_bytes(len_expected_bytes.as_ref().try_into().unwrap());
+        let len_expected: u64 = u64::from_le_bytes(len_expected_bytes.as_ref().try_into().unwrap());
 
         decompress(&*buf, usize::try_from(len_expected).unwrap()).unwrap()
     } else {
@@ -528,22 +511,22 @@ fn write_snapshot(config: &RunningConfig, snapshot: &Snapshot) -> Result<()> {
     let crc32: [u8; 4] = u32_to_arr(crc32(&bytes));
     let len_bytes: [u8; 8] = u64_to_arr(decompressed_len as u64);
 
-    let path_1_suffix =
-        format!("snap.{:016X}.generating", snapshot.stable_lsn.unwrap_or(0));
+    let path_1_suffix = format!("snap.{:016X}.generating", snapshot.stable_lsn.unwrap_or(0));
 
     let mut path_1 = config.get_path();
     path_1.push(path_1_suffix);
 
-    let path_2_suffix =
-        format!("snap.{:016X}", snapshot.stable_lsn.unwrap_or(0));
+    let path_2_suffix = format!("snap.{:016X}", snapshot.stable_lsn.unwrap_or(0));
 
     let mut path_2 = config.get_path();
     path_2.push(path_2_suffix);
 
     let parent = path_1.parent().unwrap();
     std::fs::create_dir_all(parent)?;
-    let mut f =
-        std::fs::OpenOptions::new().write(true).create(true).open(&path_1)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&path_1)?;
 
     // write the snapshot bytes, followed by a crc64 checksum at the end
     io_fail!(config, "snap write");

@@ -1,12 +1,11 @@
 use std::fs::File;
 
 use super::{
-    arr_to_lsn, arr_to_u32, assert_usize, bump_atomic_lsn, header, iobuf,
-    lsn_to_arr, maybe_decompress, pread_exact, pread_exact_or_eof, read_blob,
-    roll_iobuf, u32_to_arr, Arc, BasedBuf, BlobPointer, DiskPtr, IoBuf, IoBufs,
-    LogKind, LogOffset, Lsn, MessageKind, Reservation, Serialize, Snapshot,
-    BATCH_MANIFEST_PID, COUNTER_PID, MAX_MSG_HEADER_LEN, META_PID,
-    MINIMUM_ITEMS_PER_SEGMENT, SEG_HEADER_LEN,
+    arr_to_lsn, arr_to_u32, assert_usize, bump_atomic_lsn, header, iobuf, lsn_to_arr,
+    maybe_decompress, pread_exact, pread_exact_or_eof, read_blob, roll_iobuf, u32_to_arr, Arc,
+    BasedBuf, BlobPointer, DiskPtr, IoBuf, IoBufs, LogKind, LogOffset, Lsn, MessageKind,
+    Reservation, Serialize, Snapshot, BATCH_MANIFEST_PID, COUNTER_PID, MAX_MSG_HEADER_LEN,
+    META_PID, MINIMUM_ITEMS_PER_SEGMENT, SEG_HEADER_LEN,
 };
 
 use crate::*;
@@ -52,8 +51,7 @@ impl Log {
         trace!("reading log lsn {} ptr {}", lsn, ptr);
 
         let expected_segment_number = SegmentNumber(
-            u64::try_from(lsn).unwrap()
-                / u64::try_from(self.config.segment_size).unwrap(),
+            u64::try_from(lsn).unwrap() / u64::try_from(self.config.segment_size).unwrap(),
         );
 
         if ptr.is_inline() {
@@ -127,22 +125,15 @@ impl Log {
         #[cfg(feature = "compression")]
         {
             if self.config.use_compression && pid != BATCH_MANIFEST_PID {
-                use zstd::block::compress;
+                use zstd::bulk::compress;
 
                 let buf = item.serialize();
 
                 let _measure = Measure::new(&M.compress);
 
-                let compressed_buf =
-                    compress(&buf, self.config.compression_factor).unwrap();
+                let compressed_buf = compress(&buf, self.config.compression_factor).unwrap();
 
-                return self.reserve_inner(
-                    log_kind,
-                    pid,
-                    &IVec::from(compressed_buf),
-                    None,
-                    guard,
-                );
+                return self.reserve_inner(log_kind, pid, &IVec::from(compressed_buf), None, guard);
             }
         }
 
@@ -160,17 +151,13 @@ impl Log {
         let _measure = Measure::new(&M.reserve_lat);
 
         let serialized_len = item.serialized_size();
-        let max_buf_len =
-            u64::try_from(MAX_MSG_HEADER_LEN).unwrap() + serialized_len;
+        let max_buf_len = u64::try_from(MAX_MSG_HEADER_LEN).unwrap() + serialized_len;
 
         M.reserve_sz.measure(max_buf_len);
 
-        let max_buf_size = (self.config.segment_size
-            / MINIMUM_ITEMS_PER_SEGMENT)
-            - SEG_HEADER_LEN;
+        let max_buf_size = (self.config.segment_size / MINIMUM_ITEMS_PER_SEGMENT) - SEG_HEADER_LEN;
 
-        let over_blob_threshold =
-            max_buf_len > u64::try_from(max_buf_size).unwrap();
+        let over_blob_threshold = max_buf_len > u64::try_from(max_buf_size).unwrap();
 
         assert!(!(over_blob_threshold && blob_rewrite.is_some()));
 
@@ -186,17 +173,11 @@ impl Log {
 
         let backoff = Backoff::new();
 
-        let kind = match (
-            pid,
-            log_kind,
-            over_blob_threshold || blob_rewrite.is_some(),
-        ) {
+        let kind = match (pid, log_kind, over_blob_threshold || blob_rewrite.is_some()) {
             (COUNTER_PID, LogKind::Replace, false) => MessageKind::Counter,
             (META_PID, LogKind::Replace, true) => MessageKind::BlobMeta,
             (META_PID, LogKind::Replace, false) => MessageKind::InlineMeta,
-            (BATCH_MANIFEST_PID, LogKind::Skip, false) => {
-                MessageKind::BatchManifest
-            }
+            (BATCH_MANIFEST_PID, LogKind::Skip, false) => MessageKind::BatchManifest,
             (_, LogKind::Free, false) => MessageKind::Free,
             (_, LogKind::Replace, true) => MessageKind::BlobNode,
             (_, LogKind::Replace, false) => MessageKind::InlineNode,
@@ -229,8 +210,7 @@ impl Log {
             let iobuf = self.iobufs.current_iobuf();
             let header = iobuf.get_header();
             let buf_offset = header::offset(header);
-            let reservation_lsn =
-                iobuf.lsn + Lsn::try_from(buf_offset).unwrap();
+            let reservation_lsn = iobuf.lsn + Lsn::try_from(buf_offset).unwrap();
 
             // skip if already sealed
             if header::is_sealed(header) {
@@ -263,15 +243,11 @@ impl Log {
 
             let inline_buf_len = if over_blob_threshold {
                 usize::try_from(
-                    message_header.serialized_size()
-                        + reservation_lsn.serialized_size(),
+                    message_header.serialized_size() + reservation_lsn.serialized_size(),
                 )
                 .unwrap()
             } else {
-                usize::try_from(
-                    message_header.serialized_size() + serialized_len,
-                )
-                .unwrap()
+                usize::try_from(message_header.serialized_size() + serialized_len).unwrap()
             };
 
             trace!("reserving buf of len {}", inline_buf_len);
@@ -289,12 +265,7 @@ impl Log {
                 // Try to seal the buffer, and maybe write it if
                 // there are zero writers.
                 trace_once!("io buffer too full, spinning");
-                iobuf::maybe_seal_and_write_iobuf(
-                    &self.iobufs,
-                    &iobuf,
-                    header,
-                    true,
-                )?;
+                iobuf::maybe_seal_and_write_iobuf(&self.iobufs, &iobuf, header, true)?;
                 backoff.spin();
                 continue;
             }
@@ -358,15 +329,14 @@ impl Log {
                 reservation_lsn + inline_buf_len as Lsn - 1,
             );
 
-            let blob_id =
-                if over_blob_threshold { Some(reservation_lsn) } else { None };
+            let blob_id = if over_blob_threshold {
+                Some(reservation_lsn)
+            } else {
+                None
+            };
 
-            self.iobufs.encapsulate(
-                item,
-                message_header,
-                destination,
-                blob_id,
-            )?;
+            self.iobufs
+                .encapsulate(item, message_header, destination, blob_id)?;
 
             M.log_reservation_success();
 
@@ -386,8 +356,7 @@ impl Log {
                 lsn: reservation_lsn,
                 pointer,
                 is_blob_rewrite: blob_rewrite.is_some(),
-                header_len: usize::try_from(message_header.serialized_size())
-                    .unwrap(),
+                header_len: usize::try_from(message_header.serialized_size()).unwrap(),
             });
         }
     }
@@ -437,10 +406,7 @@ impl Log {
             let iobuf = iobuf.clone();
             threadpool::spawn(move || {
                 if let Err(e) = iobufs.write_to_log(&iobuf) {
-                    error!(
-                        "hit error while writing iobuf with lsn {}: {:?}",
-                        lsn, e
-                    );
+                    error!("hit error while writing iobuf with lsn {}: {:?}", lsn, e);
                     iobufs.config.set_global_error(e);
                 }
             })?;
@@ -534,9 +500,7 @@ impl LogRead {
     /// Return the underlying data read from a log read, if successful.
     pub fn into_data(self) -> Option<Vec<u8>> {
         match self {
-            LogRead::Blob(_, buf, _, _) | LogRead::Inline(_, buf, _) => {
-                Some(buf)
-            }
+            LogRead::Blob(_, buf, _, _) | LogRead::Inline(_, buf, _) => Some(buf),
             _ => None,
         }
     }
@@ -546,8 +510,7 @@ impl From<[u8; SEG_HEADER_LEN]> for SegmentHeader {
     fn from(buf: [u8; SEG_HEADER_LEN]) -> Self {
         #[allow(unsafe_code)]
         unsafe {
-            let crc32_header =
-                arr_to_u32(buf.get_unchecked(0..4)) ^ 0xFFFF_FFFF;
+            let crc32_header = arr_to_u32(buf.get_unchecked(0..4)) ^ 0xFFFF_FFFF;
 
             let xor_lsn = arr_to_lsn(buf.get_unchecked(4..12));
             let lsn = xor_lsn ^ 0x7FFF_FFFF_FFFF_FFFF;
@@ -567,7 +530,11 @@ impl From<[u8; SEG_HEADER_LEN]> for SegmentHeader {
                 );
             }
 
-            Self { lsn, max_stable_lsn, ok }
+            Self {
+                lsn,
+                max_stable_lsn,
+                ok,
+            }
         }
     }
 }
@@ -611,10 +578,7 @@ impl Into<[u8; SEG_HEADER_LEN]> for SegmentHeader {
     }
 }
 
-pub(crate) fn read_segment_header(
-    file: &File,
-    lid: LogOffset,
-) -> Result<SegmentHeader> {
+pub(crate) fn read_segment_header(file: &File, lid: LogOffset) -> Result<SegmentHeader> {
     trace!("reading segment header at {}", lid);
 
     let mut seg_header_buf = [0; SEG_HEADER_LEN];
@@ -635,11 +599,7 @@ pub(crate) fn read_segment_header(
 pub(crate) trait ReadAt {
     fn pread_exact(&self, dst: &mut [u8], at: u64) -> std::io::Result<()>;
 
-    fn pread_exact_or_eof(
-        &self,
-        dst: &mut [u8],
-        at: u64,
-    ) -> std::io::Result<usize>;
+    fn pread_exact_or_eof(&self, dst: &mut [u8], at: u64) -> std::io::Result<usize>;
 }
 
 impl ReadAt for File {
@@ -647,11 +607,7 @@ impl ReadAt for File {
         pread_exact(self, dst, at)
     }
 
-    fn pread_exact_or_eof(
-        &self,
-        dst: &mut [u8],
-        at: u64,
-    ) -> std::io::Result<usize> {
+    fn pread_exact_or_eof(&self, dst: &mut [u8], at: u64) -> std::io::Result<usize> {
         pread_exact_or_eof(self, dst, at)
     }
 }
@@ -674,14 +630,8 @@ impl ReadAt for BasedBuf {
         Ok(())
     }
 
-    fn pread_exact_or_eof(
-        &self,
-        dst: &mut [u8],
-        mut at: u64,
-    ) -> std::io::Result<usize> {
-        if at < self.offset
-            || u64::try_from(self.buf.len()).unwrap() < at - self.offset
-        {
+    fn pread_exact_or_eof(&self, dst: &mut [u8], mut at: u64) -> std::io::Result<usize> {
+        if at < self.offset || u64::try_from(self.buf.len()).unwrap() < at - self.offset {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "failed to fill buffer",
@@ -710,11 +660,14 @@ pub(crate) fn read_message<R: ReadAt>(
     let _measure = Measure::new(&M.read);
     let segment_len = config.segment_size;
     let seg_start = lid / segment_len as LogOffset * segment_len as LogOffset;
-    trace!("reading message from segment: {} at lid: {}", seg_start, lid);
+    trace!(
+        "reading message from segment: {} at lid: {}",
+        seg_start,
+        lid
+    );
     assert!(seg_start + SEG_HEADER_LEN as LogOffset <= lid);
     assert!(
-        (seg_start + segment_len as LogOffset) - lid
-            >= MAX_MSG_HEADER_LEN as LogOffset,
+        (seg_start + segment_len as LogOffset) - lid >= MAX_MSG_HEADER_LEN as LogOffset,
         "tried to read a message from the red zone"
     );
 
@@ -731,8 +684,7 @@ pub(crate) fn read_message<R: ReadAt>(
 
     assert!(lid + message_offset as LogOffset <= ceiling);
 
-    let max_possible_len =
-        assert_usize(ceiling - lid - message_offset as LogOffset);
+    let max_possible_len = assert_usize(ceiling - lid - message_offset as LogOffset);
 
     if header.len > max_possible_len as u64 {
         trace!(
@@ -763,18 +715,17 @@ pub(crate) fn read_message<R: ReadAt>(
         buf.copy_from_slice(header_cursor[..header_len].as_ref());
     }
 
-    let crc32 = calculate_message_crc32(
-        msg_header_buf[..message_offset].as_ref(),
-        &buf,
-    );
+    let crc32 = calculate_message_crc32(msg_header_buf[..message_offset].as_ref(), &buf);
 
     if crc32 != header.crc32 {
-        trace!("read a message with a bad checksum with header {:?}", header);
+        trace!(
+            "read a message with a bad checksum with header {:?}",
+            header
+        );
         return Ok(LogRead::Corrupted);
     }
 
-    let inline_len = u32::try_from(message_offset).unwrap()
-        + u32::try_from(header.len).unwrap();
+    let inline_len = u32::try_from(message_offset).unwrap() + u32::try_from(header.len).unwrap();
 
     if header.segment_number != expected_segment_number {
         debug!(
@@ -793,9 +744,7 @@ pub(crate) fn read_message<R: ReadAt>(
             trace!("read pad in segment number {:?}", header.segment_number);
             Ok(LogRead::Cap(header.segment_number))
         }
-        MessageKind::BlobLink
-        | MessageKind::BlobNode
-        | MessageKind::BlobMeta => {
+        MessageKind::BlobLink | MessageKind::BlobNode | MessageKind::BlobMeta => {
             let id = arr_to_lsn(&buf);
 
             match read_blob(id, config) {
@@ -809,9 +758,7 @@ pub(crate) fn read_message<R: ReadAt>(
 
                     Ok(LogRead::Blob(header, buf, id, inline_len))
                 }
-                Err(Error::Io(ref e))
-                    if e.kind() == std::io::ErrorKind::NotFound =>
-                {
+                Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
                     debug!(
                         "underlying blob file not found for blob {} in segment number {:?}",
                         id, header.segment_number,
